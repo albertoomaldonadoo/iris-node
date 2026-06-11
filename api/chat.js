@@ -20,16 +20,27 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { message, model = "llama3.1:latest" } = req.body ?? {};
+    const body = req.body ?? {};
+    const model = body.model ?? process.env.OLLAMA_MODEL ?? "llama3.1:latest";
 
-    if (!message) return res.status(400).json({ error: "message is required" });
+    let messages;
+    if (Array.isArray(body.messages) && body.messages.length > 0) {
+      messages = body.messages.map((m) => ({
+        role: m.role ?? "user",
+        content: m.text ?? m.content ?? "",
+      }));
+    } else if (body.message) {
+      messages = [{ role: "user", content: body.message }];
+    } else {
+      return res.status(400).json({ error: "messages or message is required" });
+    }
 
     const ollamaRes = await fetch(`${ollamaBaseUrl}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model,
-        messages: [{ role: "user", content: message }],
+        messages,
         stream: false,
       }),
     });

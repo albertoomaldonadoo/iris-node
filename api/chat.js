@@ -1,61 +1,74 @@
-export default async function handler(req, res) {
+import { createChatResponse } from "../lib/application/create-chat-response.js";
+import { validateAndNormalizeChatRequest } from "../lib/domain/chat-contract.js";
+import { getOllamaConfigError } from "../lib/infrastructure/ollama-client.js";
+import { isAuthorizedRequest } from "../lib/interfaces/http-auth.js";
+
+function setCorsHeaders(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+}
 
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+function sendError(res, status, error, details = []) {
+  return res.status(status).json({
+    error,
+    ...(details.length > 0 && { details })
+  });
+}
 
-  const apiKey = process.env.IRIS_API_KEY;
-  if (apiKey) {
-    const auth = req.headers.authorization;
-    if (auth !== `Bearer ${apiKey}`) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+function parseBody(req) {
+  if (req.body === undefined || req.body === null) {
+    return {};
   }
 
-  const ollamaBaseUrl = process.env.OLLAMA_BASE_URL;
-  if (!ollamaBaseUrl) {
-    return res.status(500).json({ error: "OLLAMA_BASE_URL is not configured" });
+  if (typeof req.body === "string") {
+    return JSON.parse(req.body);
+  }
+
+  return req.body;
+}
+
+export default async function handler(req, res) {
+  setCorsHeaders(res);
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
+  if (req.method !== "POST") {
+    return sendError(res, 405, "Method not allowed");
+  }
+
+  if (!isAuthorizedRequest(req)) {
+    return sendError(res, 401, "Unauthorized");
+  }
+
+  const configError = getOllamaConfigError();
+  if (configError) {
+    return sendError(res, 503, configError);
+  }
+
+  let body;
+  try {
+    body = parseBody(req);
+  } catch {
+    return sendError(res, 400, "Invalid JSON body", [
+      { message: "Request body must be valid JSON." }
+    ]);
+  }
+
+  const validation = validateAndNormalizeChatRequest(body);
+  if (!validation.ok) {
+    return sendError(res, 400, "Invalid request body", validation.details);
   }
 
   try {
-    const body = req.body ?? {};
-    const model = body.model ?? process.env.OLLAMA_MODEL ?? "llama3.1:latest";
-
-    let messages;
-    if (Array.isArray(body.messages) && body.messages.length > 0) {
-      messages = body.messages.map((m) => ({
-        role: m.role ?? "user",
-        content: m.text ?? m.content ?? "",
-      }));
-    } else if (body.message) {
-      messages = [{ role: "user", content: body.message }];
-    } else {
-      return res.status(400).json({ error: "messages or message is required" });
-    }
-
-    const ollamaRes = await fetch(`${ollamaBaseUrl}/api/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model,
-        messages,
-        stream: false,
-      }),
-    });
-
-    if (!ollamaRes.ok) {
-      const detail = await ollamaRes.text();
-      throw new Error(`Ollama error ${ollamaRes.status}: ${detail}`);
-    }
-
-    const data = await ollamaRes.json();
-    return res.status(200).json({
-      response: data.message?.content ?? "",
-      model: data.model,
-    });
+    const response = await createChatResponse(validation.value);
+    return res.status(200).json(response);
   } catch (error) {
-    return res.status(500).json({ error: error.message });
+    console.error("Chat failed", {
+      message: error instanceof Error ? error.message : String(error)
+    });
+    return sendError(res, 500, "Chat failed");
   }
 }
